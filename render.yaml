@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: amrutam-telemedicine-api
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install && npx prisma generate && npx prisma migrate deploy && node prisma/seed.js
+    startCommand: node src/server.js
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: amrutam-postgres
+          property: connectionString
+      - key: ENABLE_IN_PROCESS_WORKER
+        value: 'true'
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: PAYMENT_WEBHOOK_SECRET
+        generateValue: true
+      - key: VIDEO_JWT_SECRET
+        generateValue: true
+      - key: MFA_ENCRYPTION_KEY
+        generateValue: true
+      - key: CORS_ORIGIN
+        value: '*'
+      - key: LOG_LEVEL
+        value: info
+      - key: PAYMENT_PROVIDER
+        value: MOCK
+      - key: VIDEO_PROVIDER
+        value: MOCK_WEBRTC
+
+databases:
+  - name: amrutam-postgres
+    databaseName: amrutam_telemedicine
+    user: amrutam
+    plan: free
+    region: oregon

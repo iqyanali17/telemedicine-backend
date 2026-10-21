@@ -1,0 +1,396 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  PATIENT
+  DOCTOR
+  ADMIN
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+enum SlotStatus {
+  AVAILABLE
+  BOOKED
+  BLOCKED
+  CANCELLED
+}
+
+enum ConsultationStatus {
+  REQUESTED
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum SessionStatus {
+  INITIATED
+  ACTIVE
+  COMPLETED
+  TERMINATED
+}
+
+enum MessageType {
+  TEXT
+  ATTACHMENT
+  SYSTEM
+}
+
+enum NotificationType {
+  BOOKING_CONFIRMED
+  CONSULTATION_CANCELLED
+  PRESCRIPTION_ISSUED
+  UPCOMING_REMINDER
+  PAYMENT_REFUNDED
+  SYSTEM
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+  IN_APP
+}
+
+enum NotificationStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+}
+
+model User {
+  id              String    @id @default(uuid())
+  email           String    @unique
+  passwordHash    String
+  role            Role      @default(PATIENT)
+  isActive        Boolean   @default(true)
+  isMfaEnabled    Boolean   @default(false)
+  mfaSecret       String?
+  lastTotpCounter BigInt?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  profile              Profile?
+  doctorProfile        DoctorProfile?
+  patientConsultations Consultation[] @relation("PatientConsultations")
+  prescriptions        Prescription[] @relation("PatientPrescriptions")
+  payments             Payment[]
+  auditLogs            AuditLog[]
+  refreshTokens        RefreshToken[]
+  consultationMessages ConsultationMessage[]
+  medicalAttachments   MedicalAttachment[]
+  notifications        Notification[]
+
+  @@index([email])
+  @@index([role])
+  @@map("users")
+}
+
+model Profile {
+  id               String    @id @default(uuid())
+  userId           String    @unique
+  firstName        String
+  lastName         String
+  phone            String?   @unique
+  dateOfBirth      DateTime?
+  gender           Gender?
+  bloodGroup       String?
+  address          String?
+  emergencyContact String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("profiles")
+}
+
+model DoctorProfile {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  licenseNumber   String   @unique
+  specialization  String
+  experienceYears Int      @default(0)
+  consultationFee Decimal  @db.Decimal(10, 2)
+  qualification   String
+  bio             String?
+  isVerified      Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  availabilitySlots AvailabilitySlot[]
+  consultations     Consultation[]     @relation("DoctorConsultations")
+  prescriptions     Prescription[]     @relation("DoctorPrescriptions")
+
+  @@index([specialization])
+  @@index([isVerified])
+  @@map("doctor_profiles")
+}
+
+model AvailabilitySlot {
+  id        String     @id @default(uuid())
+  doctorId  String
+  startTime DateTime
+  endTime   DateTime
+  status    SlotStatus @default(AVAILABLE)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  doctor        DoctorProfile  @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  consultations Consultation[]
+
+  @@unique([doctorId, startTime, endTime])
+  @@index([doctorId, status])
+  @@index([startTime, endTime])
+  @@map("availability_slots")
+}
+
+model Consultation {
+  id                 String             @id @default(uuid())
+  consultationNumber String             @unique
+  patientId          String
+  doctorId           String
+  slotId             String
+  status             ConsultationStatus @default(SCHEDULED)
+  scheduledAt        DateTime
+  startedAt          DateTime?
+  endedAt            DateTime?
+  notes              String?
+  cancellationReason String?
+  idempotencyKey     String?            @unique
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  patient      User             @relation("PatientConsultations", fields: [patientId], references: [id], onDelete: Restrict)
+  doctor       DoctorProfile    @relation("DoctorConsultations", fields: [doctorId], references: [id], onDelete: Restrict)
+  slot         AvailabilitySlot @relation(fields: [slotId], references: [id], onDelete: Restrict)
+  prescription Prescription?
+  payment      Payment?
+  videoSession VideoSession?
+  messages     ConsultationMessage[]
+  attachments  MedicalAttachment[]
+
+  @@index([patientId, status])
+  @@index([doctorId, status])
+  @@index([scheduledAt])
+  @@index([slotId])
+  @@map("consultations")
+}
+
+model Prescription {
+  id             String    @id @default(uuid())
+  consultationId String    @unique
+  doctorId       String
+  patientId      String
+  diagnosis      String
+  medicines      Json
+  instructions   String?
+  validUntil     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  consultation Consultation  @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  doctor       DoctorProfile @relation("DoctorPrescriptions", fields: [doctorId], references: [id], onDelete: Restrict)
+  patient      User          @relation("PatientPrescriptions", fields: [patientId], references: [id], onDelete: Restrict)
+
+  @@index([patientId])
+  @@index([doctorId])
+  @@map("prescriptions")
+}
+
+model Payment {
+  id             String        @id @default(uuid())
+  consultationId String        @unique
+  patientId      String
+  amount         Decimal       @db.Decimal(10, 2)
+  currency       String        @default("INR")
+  status         PaymentStatus @default(PENDING)
+  paymentMethod  String?
+  transactionRef String?       @unique
+  refundRef      String?       @unique
+  refundReason   String?
+  refundedAt     DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  patient      User         @relation(fields: [patientId], references: [id], onDelete: Restrict)
+  refundOperations RefundOperation[]
+
+  @@index([patientId, status])
+  @@map("payments")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  action     String
+  entityType String
+  entityId   String?
+  ipAddress  String?
+  userAgent  String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@map("refresh_tokens")
+}
+
+model VideoSession {
+  id              String        @id @default(uuid())
+  consultationId  String        @unique
+  roomId          String        @unique
+  provider        String        @default("MOCK_WEBRTC")
+  status          SessionStatus @default(INITIATED)
+  roomUrl         String?
+  startedAt       DateTime?
+  endedAt         DateTime?
+  durationSeconds Int?
+  metadata        Json?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+
+  @@index([roomId])
+  @@index([status])
+  @@map("video_sessions")
+}
+
+model ConsultationMessage {
+  id             String      @id @default(uuid())
+  consultationId String
+  senderId       String
+  senderRole     Role
+  content        String
+  messageType    MessageType @default(TEXT)
+  isRead         Boolean     @default(false)
+  readAt         DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  consultation Consultation        @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  sender       User                @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  attachments  MedicalAttachment[]
+
+  @@index([consultationId, createdAt])
+  @@index([senderId])
+  @@map("consultation_messages")
+}
+
+model MedicalAttachment {
+  id              String   @id @default(uuid())
+  consultationId  String
+  uploaderId      String
+  messageId       String?
+  fileName        String
+  fileKey         String   @unique
+  fileSize        Int
+  mimeType        String
+  storageProvider String   @default("LOCAL_SECURE")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  consultation Consultation         @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  uploader     User                 @relation(fields: [uploaderId], references: [id], onDelete: Restrict)
+  message      ConsultationMessage? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  @@index([consultationId])
+  @@index([uploaderId])
+  @@map("medical_attachments")
+}
+
+model Notification {
+  id             String              @id @default(uuid())
+  userId         String
+  type           NotificationType
+  channel        NotificationChannel @default(IN_APP)
+  recipient      String
+  subject        String?
+  content        String
+  status         NotificationStatus  @default(PENDING)
+  isRead         Boolean             @default(false)
+  readAt         DateTime?
+  sentAt         DateTime?
+  errorMessage   String?
+  metadata       Json?
+  attempts       Int                 @default(0)
+  maxAttempts    Int                 @default(3)
+  nextRetryAt    DateTime?           @default(now())
+  idempotencyKey String?             @unique
+  processedAt    DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
+  @@index([status, nextRetryAt])
+  @@map("notifications")
+}
+
+model RefundOperation {
+  id             String   @id @default(uuid())
+  paymentId      String
+  consultationId String
+  amount         Decimal  @db.Decimal(10, 2)
+  reason         String
+  status         String   @default("PENDING") // PENDING, COMPLETED, FAILED
+  idempotencyKey String   @unique
+  refundRef      String?
+  errorMessage   String?
+  attempts       Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId])
+  @@index([status])
+  @@index([consultationId])
+  @@map("refund_operations")
+}
+
+

@@ -1,0 +1,2891 @@
+openapi: 3.0.3
+info:
+  title: Amrutam Telemedicine Backend API
+  version: 1.0.0
+  description: >-
+    Production-ready backend API foundation for the Amrutam Telemedicine platform.
+    Provides secure authentication with rotating JWTs & TOTP MFA, doctor discovery with
+    GIN-indexed trigram full-text search, concurrency-safe availability scheduling,
+    idempotent appointment booking, WebRTC/Jitsi video consultations, clinical messaging
+    with magic-byte verified attachments, digital Ayurvedic prescriptions with PDF generation,
+    webhook-verified payment reconciliation, and administrative compliance audit trails.
+servers:
+  - url: http://localhost:5000/api/v1
+    description: Local development server
+  - url: /api/v1
+    description: Production API gateway
+
+tags:
+  - name: Health & System
+    description: System liveness, database readiness, and operational telemetry
+  - name: Authentication
+    description: User registration, dual-token JWT lifecycle, password management, and TOTP MFA
+  - name: Users
+    description: Patient personal profiles and medical details management
+  - name: Doctors
+    description: Doctor directory search, experience filtering, and practitioner profiles
+  - name: Availability
+    description: Practitioner schedule management, slot creation, and vacancy lookup
+  - name: Consultations
+    description: Concurrency-safe appointment booking, lifecycle state transitions, and history
+  - name: Video Consultations
+    description: Real-time telemedicine video rooms, token generation, and session lifecycle
+  - name: Clinical Messaging
+    description: Secure in-consultation chat messaging and encrypted clinical attachment exchange
+  - name: Prescriptions
+    description: Ayurvedic prescription generation, dosage schedules, and downloadable PDF documents
+  - name: Payments
+    description: Razorpay/Mock payment initiation, HMAC-SHA256 webhooks, refunds, and reconciliation
+  - name: Notifications
+    description: Real-time user notifications, unread tracking, and automated appointment reminders
+  - name: Admin
+    description: Platform operational analytics, HIPAA/clinical audit trails, and background processing
+
+paths:
+  /health:
+    get:
+      tags: [Health & System]
+      summary: Liveness probe
+      description: Returns process vitality and uptime metrics. Used by container orchestrators to confirm the Node.js process is active and responsive.
+      responses:
+        '200':
+          description: Service process is active and responding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: 'ok'
+                service: 'amrutam-telemedicine-backend'
+                timestamp: '2026-10-21T21:00:00.000Z'
+                uptimeSeconds: 3600
+
+  /ready:
+    get:
+      tags: [Health & System]
+      summary: Readiness probe
+      description: Validates database connectivity, connection pooling, and critical subsystem availability. Returns HTTP 200 when ready to receive traffic, HTTP 503 if dependencies fail.
+      responses:
+        '200':
+          description: Service and database are connected and ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+              example:
+                status: 'ready'
+                service: 'amrutam-telemedicine-backend'
+                timestamp: '2026-10-21T21:00:00.000Z'
+                dependencies:
+                  database:
+                    status: 'connected'
+                    latencyMs: 4
+        '503':
+          description: Essential database dependency is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              example:
+                success: false
+                statusCode: 503
+                message: 'Database connection failed'
+
+  /metrics:
+    get:
+      tags: [Health & System]
+      summary: Observability telemetry snapshot
+      description: Returns real-time metrics including total HTTP requests, status code distribution (2xx, 4xx, 5xx), active connections, and memory consumption.
+      responses:
+        '200':
+          description: Telemetry data snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uptimeSeconds:
+                    type: integer
+                  requests:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      status2xx:
+                        type: integer
+                      status4xx:
+                        type: integer
+                      status5xx:
+                        type: integer
+                  memoryUsage:
+                    type: object
+                    properties:
+                      rssBytes:
+                        type: integer
+                      heapUsedBytes:
+                        type: integer
+
+  /auth/register:
+    post:
+      tags: [Authentication]
+      summary: Register a new patient account
+      description: Public self-registration endpoint restricted to PATIENT role. Enforces production-grade validation: first and last names cannot contain numbers, email must contain '@', mobile number must be a valid 10-digit number, and password must be at least 8 characters with at least one uppercase letter, lowercase letter, number, and special symbol.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              email: 'patient@example.com'
+              password: 'SecurePassword123!'
+              role: 'PATIENT'
+              firstName: 'Ananya'
+              lastName: 'Sharma'
+              phone: '9899312345'
+      responses:
+        '201':
+          description: User registered successfully with JWT access and refresh tokens
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSuccessResponse'
+              example:
+                success: true
+                statusCode: 201
+                message: 'User registered successfully'
+                data:
+                  user:
+                    id: '11111111-1111-1111-1111-111111111111'
+                    email: 'patient@example.com'
+                    role: 'PATIENT'
+                    profile:
+                      firstName: 'Ananya'
+                      lastName: 'Sharma'
+                      phone: '9899312345'
+                  tokens:
+                    accessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+                    refreshToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+        '409':
+          description: Email address already registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              example:
+                success: false
+                statusCode: 409
+                message: 'User with this email already exists'
+        '422':
+          description: Validation failure (e.g. number in name, weak password, invalid phone length)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: Authenticate credentials and initiate session
+      description: Verifies user credentials. If TOTP MFA is enabled on the account, returns an intermediate mfaSessionToken with mfaRequired: true. If MFA is not enabled, issues full access and refresh tokens (and sets an HttpOnly Secure refreshToken cookie).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: 'patient@example.com'
+              password: 'SecurePassword123!'
+      responses:
+        '200':
+          description: Successfully authenticated (or MFA challenge required)
+          headers:
+            Set-Cookie:
+              description: Secure HttpOnly refreshToken cookie (when MFA is not required)
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSuccessResponse'
+              example:
+                success: true
+                statusCode: 200
+                message: 'Login successful'
+                data:
+                  user:
+                    id: '11111111-1111-1111-1111-111111111111'
+                    email: 'patient@example.com'
+                    role: 'PATIENT'
+                  tokens:
+                    accessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+                    refreshToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+        '401':
+          description: Invalid email or password credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              example:
+                success: false
+                statusCode: 401
+                message: 'Invalid email or password'
+        '422':
+          description: Malformed email or missing password field
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+
+  /auth/mfa/login:
+    post:
+      tags: [Authentication]
+      summary: Verify two-factor authentication code during login
+      description: Completes the MFA challenge step after initial credential verification. Accepts the temporary mfaSessionToken and the 6-digit TOTP code. Enforces replay defense and simultaneous concurrency protection.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfaSessionToken, code]
+              properties:
+                mfaSessionToken:
+                  type: string
+                  description: Temporary token issued by /auth/login when MFA is required
+                code:
+                  type: string
+                  minLength: 6
+                  maxLength: 6
+                  example: '123456'
+                  description: Exactly 6 numeric digits generated by authenticator app
+      responses:
+        '200':
+          description: MFA verification succeeded and session established
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSuccessResponse'
+        '401':
+          description: Invalid, expired, or replayed MFA code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              example:
+                success: false
+                statusCode: 401
+                message: 'Invalid or already used TOTP verification code'
+
+  /auth/refresh:
+    post:
+      tags: [Authentication]
+      summary: Refresh JWT access token with cryptographic rotation
+      description: Exchanges an active refresh token for a brand new access token and rotated refresh token. Accepts the refresh token from either the HttpOnly cookie or the request body. Implements automated token reuse detection.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken:
+                  type: string
+                  description: Optional if provided via HttpOnly refreshToken cookie
+      responses:
+        '200':
+          description: Access token refreshed and refresh token rotated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  statusCode:
+                    type: integer
+                    example: 200
+                  message:
+                    type: string
+                    example: 'Tokens refreshed successfully'
+                  data:
+                    type: object
+                    properties:
+                      tokens:
+                        type: object
+                        properties:
+                          accessToken:
+                            type: string
+                          refreshToken:
+                            type: string
+        '401':
+          description: Expired, invalid, or reused refresh token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Terminate session and invalidate refresh token
+      description: Revokes the specified refresh token from the database whitelist and clears the HttpOnly session cookie, immediately ending the user session.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '200':
+          description: Logged out successfully and session terminated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+              example:
+                success: true
+                statusCode: 200
+                message: 'Logged out successfully'
+
+  /auth/me:
+    get:
+      tags: [Authentication]
+      summary: Get authenticated user profile and roles
+      description: Returns the user ID, email, role, MFA status, and associated profile information extracted from the validated JWT token.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Authenticated user context
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  statusCode:
+                    type: integer
+                    example: 200
+                  message:
+                    type: string
+                    example: 'Authenticated user context retrieved'
+                  data:
+                    type: object
+                    properties:
+                      user:
+                        $ref: '#/components/schemas/User'
+        '401':
+          description: Missing or expired Bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /auth/mfa/setup:
+    post:
+      tags: [Authentication]
+      summary: Initiate TOTP MFA enrollment
+      description: Generates a high-entropy cryptographically secure TOTP secret, stores it temporarily encrypted with AES-256-GCM, and returns the standard otpauth:// URI and secret key for scanning in Google Authenticator or 1Password.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: MFA setup parameters generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  statusCode:
+                    type: integer
+                    example: 200
+                  message:
+                    type: string
+                    example: 'MFA setup initiated'
+                  data:
+                    type: object
+                    properties:
+                      secret:
+                        type: string
+                        example: 'JBSWY3DPEHPK3PXP'
+                      otpAuthUri:
+                        type: string
+                        example: 'otpauth://totp/Amrutam%20Telemedicine:patient@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Amrutam%20Telemedicine'
+        '409':
+          description: MFA is already enabled on this account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /auth/mfa/verify:
+    post:
+      tags: [Authentication]
+      summary: Verify TOTP token and activate MFA
+      description: Confirms that the user has successfully configured their authenticator application by verifying a 6-digit code. Upon success, permanently enables MFA for future logins.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [secret, code]
+              properties:
+                secret:
+                  type: string
+                  description: TOTP secret provided in /auth/mfa/setup
+                code:
+                  type: string
+                  minLength: 6
+                  maxLength: 6
+                  example: '123456'
+      responses:
+        '200':
+          description: MFA successfully enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+        '422':
+          description: Invalid TOTP verification code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+
+  /auth/mfa/disable:
+    post:
+      tags: [Authentication]
+      summary: Disable MFA after verifying password and TOTP
+      description: Requires step-up authentication with the account password and a valid TOTP code to deactivate two-factor authentication. Automatically revokes all existing sessions to protect against account takeover.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, code]
+              properties:
+                password:
+                  type: string
+                code:
+                  type: string
+                  minLength: 6
+                  maxLength: 6
+                  example: '123456'
+      responses:
+        '200':
+          description: MFA successfully disabled and sessions terminated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+        '401':
+          description: Invalid password or TOTP verification code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /users/profile:
+    get:
+      tags: [Users]
+      summary: Get authenticated patient profile
+      description: Retrieves the authenticated patient's personal, demographic, and medical details formatted with an executive summary first followed by the detailed profile.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Patient profile data retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfileResponse'
+              example:
+                success: true
+                statusCode: 200
+                message: 'User profile retrieved successfully'
+                data:
+                  summary:
+                    name: 'Ananya Sharma'
+                    role: 'PATIENT'
+                    email: 'patient@example.com'
+                    isMfaActive: false
+                    hasCompletedProfile: true
+                  profile:
+                    id: '11111111-1111-1111-1111-111111111111'
+                    email: 'patient@example.com'
+                    role: 'PATIENT'
+                    firstName: 'Ananya'
+                    lastName: 'Sharma'
+                    phone: '+919899312345'
+                    gender: 'FEMALE'
+                    bloodGroup: 'B+'
+                    address: 'Civil Lines, Delhi'
+                    emergencyContact: '+919899300000'
+                    dateOfBirth: '1995-04-12T00:00:00.000Z'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+    patch:
+      tags: [Users]
+      summary: Update patient profile information
+      description: Updates patient demographic information. Enforces validation ensuring names contain no digits, phone and emergency contact numbers are valid 10-digit formats, and bloodGroup matches clinical enum values.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileUpdateRequest'
+            example:
+              firstName: 'Ananya'
+              lastName: 'Sharma'
+              phone: '9899312345'
+              bloodGroup: 'B+'
+              address: 'Connaught Place, New Delhi'
+              emergencyContact: '9899300000'
+      responses:
+        '200':
+          description: Profile updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+        '422':
+          description: Validation failure on bloodGroup, phone format, or name characters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+
+  /doctors:
+    get:
+      tags: [Doctors]
+      summary: Search and list verified doctors
+      description: Search verified Ayurvedic doctors using PostgreSQL GIN-indexed trigram similarity across practitioner name, specialization, qualification, and bio. Returns a structured response with aggregated summary statistics (total, verified, unverified), an items array, and pagination metadata.
+      parameters:
+        - name: q
+          in: query
+          description: Full-text search term across practitioner name, specialization, bio, or qualification
+          schema:
+            type: string
+            example: 'Kayachikitsa'
+        - name: search
+          in: query
+          description: Alias for query parameter 'q'
+          schema:
+            type: string
+        - name: specialization
+          in: query
+          description: Filter practitioners by specific Ayurvedic clinical specialization
+          schema:
+            type: string
+            example: 'Ayurveda'
+        - name: minExperience
+          in: query
+          description: Minimum clinical experience in years
+          schema:
+            type: integer
+            minimum: 0
+            example: 5
+        - name: minFee
+          in: query
+          description: Minimum consultation fee boundary in INR
+          schema:
+            type: number
+            minimum: 0
+            example: 500
+        - name: maxFee
+          in: query
+          description: Maximum consultation fee boundary in INR
+          schema:
+            type: number
+            minimum: 0
+            example: 1000
+        - name: sortBy
+          in: query
+          description: Sorting criterion for doctor results
+          schema:
+            type: string
+            enum: [experience_desc, fee_asc, fee_desc, name_asc]
+            default: experience_desc
+        - name: page
+          in: query
+          description: Pagination page number (1-indexed)
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: limit
+          in: query
+          description: Number of doctor items per page (maximum 50)
+          schema:
+            type: integer
+            default: 10
+            minimum: 1
+            maximum: 50
+      responses:
+        '200':
+          description: Filtered list of doctors with summary statistics and pagination metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DoctorListResponse'
+              example:
+                success: true
+                statusCode: 200
+                message: 'Doctors retrieved successfully'
+                data:
+                  summary:
+                    total: 20
+                    verified: 15
+                    unverified: 5
+                  items:
+                    - id: 'e2297eb0-4613-4f93-8b77-d64e97669d01'
+                      userId: '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d'
+                      name: 'Dr. Ananya Sharma'
+                      email: 'doctor@example.com'
+                      specialization: 'Ayurveda'
+                      experienceYears: 8
+                      consultationFee: 750
+                      isVerified: true
+                meta:
+                  pagination:
+                    page: 1
+                    limit: 10
+                    totalItems: 20
+                    totalPages: 2
+                    hasNextPage: true
+                    hasPreviousPage: false
+
+  /doctors/profile:
+    patch:
+      tags: [Doctors]
+      summary: Update practitioner profile details (Doctor only)
+      description: Allows an authenticated doctor to update their clinical consultation fee, medical qualification, specialization, and professional bio. Restricted strictly to users with the DOCTOR role.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                specialization:
+                  type: string
+                  example: 'Panchakarma & Kayachikitsa'
+                experienceYears:
+                  type: integer
+                  minimum: 0
+                  example: 10
+                consultationFee:
+                  type: number
+                  minimum: 0
+                  example: 800
+                qualification:
+                  type: string
+                  example: 'BAMS, MD (Ayurveda)'
+                bio:
+                  type: string
+                  maxLength: 2000
+                  example: 'Senior Ayurvedic Physician with 10 years clinical experience in holistic wellness.'
+      responses:
+        '200':
+          description: Doctor profile updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+        '403':
+          description: Forbidden - Requires DOCTOR role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              example:
+                success: false
+                statusCode: 403
+                message: 'Forbidden: Insufficient permissions for this resource'
+        '404':
+          description: Doctor profile not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /doctors/{id}:
+    get:
+      tags: [Doctors]
+      summary: Get doctor details by ID
+      description: Retrieves complete public details for a specific doctor including upcoming availability slots, qualification, bio, and fee. Structured with an overview summary first followed by the detailed profile.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Unique UUID of the doctorProfile record
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Doctor profile details with summary and profile sections
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DoctorDetailResponse'
+              example:
+                success: true
+                statusCode: 200
+                message: 'Doctor profile retrieved successfully'
+                data:
+                  summary:
+                    name: 'Dr. Ananya Sharma'
+                    specialization: 'Ayurveda'
+                    experienceYears: 8
+                    consultationFee: 750
+                    isVerified: true
+                    availableSlotsCount: 5
+                  profile:
+                    id: 'e2297eb0-4613-4f93-8b77-d64e97669d01'
+                    userId: '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d'
+                    name: 'Dr. Ananya Sharma'
+                    email: 'doctor@example.com'
+                    phone: '+919899312345'
+                    specialization: 'Ayurveda'
+                    qualification: 'BAMS'
+                    experienceYears: 8
+                    consultationFee: 750
+                    bio: 'Senior Ayurvedic Practitioner'
+                    isVerified: true
+                    availableSlots: []
+        '404':
+          description: Doctor profile not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '422':
+          description: Invalid path parameter format (must be valid UUID)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+
+  /availability:
+    get:
+      tags: [Availability]
+      summary: Query available booking slots
+      description: Returns open availability slots filtered by practitioner ID, calendar date, or slot status. Formatted with total, available, and booked slot counters in the summary.
+      parameters:
+        - name: doctorId
+          in: query
+          description: Filter slots by doctor profile UUID
+          schema:
+            type: string
+            format: uuid
+        - name: date
+          in: query
+          description: Filter slots for a specific date (YYYY-MM-DD)
+          schema:
+            type: string
+            example: '2026-10-25'
+        - name: status
+          in: query
+          description: Filter slots by status (AVAILABLE, BOOKED, BLOCKED, CANCELLED)
+          schema:
+            type: string
+            enum: [AVAILABLE, BOOKED, BLOCKED, CANCELLED]
+            default: AVAILABLE
+      responses:
+        '200':
+          description: List of availability slots with summary statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AvailabilitySlotsResponse'
+        '422':
+          description: Invalid date format or non-UUID doctorId
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+
+    post:
+      tags: [Availability]
+      summary: Batch create availability slots (Doctors only)
+      description: Allows a verified doctor to publish up to 100 availability slots in a single batch. Enforces strict business validations: startTime cannot be in the past, endTime must be strictly after startTime, and overlapping slots are rejected.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSlotsRequest'
+            example:
+              slots:
+                - startTime: '2026-10-25T10:00:00.000Z'
+                  endTime: '2026-10-25T10:30:00.000Z'
+                - startTime: '2026-10-25T10:30:00.000Z'
+                  endTime: '2026-10-25T11:00:00.000Z'
+      responses:
+        '201':
+          description: Slots created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+        '403':
+          description: Forbidden - Only verified doctors can create availability slots
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '422':
+          description: Validation failure (past startTime, endTime before startTime, batch > 100)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+
+  /availability/{id}:
+    delete:
+      tags: [Availability]
+      summary: Delete unbooked availability slot (Doctor only)
+      description: Removes an unbooked slot from practitioner availability. If the slot has already been booked or has associated consultation records, deletion is rejected with HTTP 409 Conflict to preserve audit integrity.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Unique UUID of the availabilitySlot record
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Slot deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+        '403':
+          description: Forbidden - Slot belongs to a different doctor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '409':
+          description: Conflict - Slot has already been booked or has consultation history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /consultations/book:
+    post:
+      tags: [Consultations]
+      summary: Concurrency-safe, idempotent appointment booking
+      description: Atomically reserves an open availability slot and creates a consultation record. Implements database-level row locking (SELECT FOR UPDATE) to prevent double-booking race conditions under high concurrency. Supports client-supplied Idempotency-Key header or body field to safely handle network retries. Restricted to PATIENT role.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookConsultationRequest'
+            example:
+              slotId: '22222222-2222-2222-2222-222222222222'
+              notes: 'Recurring migraine headaches for 2 weeks'
+              idempotencyKey: 'idemp-req-77889900'
+      responses:
+        '201':
+          description: Consultation booked successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsultationBookingResponse'
+        '403':
+          description: Forbidden - Only patients can book consultations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '409':
+          description: Slot is no longer available or already reserved by another patient
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              example:
+                success: false
+                statusCode: 409
+                message: 'Slot is no longer available'
+
+  /consultations:
+    get:
+      tags: [Consultations]
+      summary: List authenticated user consultations
+      description: Retrieves consultations with role-based filtering (patients view their bookings, doctors view their scheduled appointments, admins view all system consultations). Returns summary breakdown of statuses (scheduled, inProgress, completed, cancelled) followed by items and pagination metadata.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          description: Filter consultations by lifecycle status
+          schema:
+            type: string
+            enum: [REQUESTED, SCHEDULED, IN_PROGRESS, COMPLETED, CANCELLED, NO_SHOW]
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Paginated consultations with status summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsultationListResponse'
+              example:
+                success: true
+                statusCode: 200
+                message: 'Consultations retrieved successfully'
+                data:
+                  summary:
+                    total: 12
+                    scheduled: 4
+                    inProgress: 1
+                    completed: 6
+                    cancelled: 1
+                  items:
+                    - id: '33333333-3333-3333-3333-333333333333'
+                      consultationNumber: 'AMR-20261021-0001'
+                      status: 'SCHEDULED'
+                      scheduledAt: '2026-10-25T10:00:00.000Z'
+                      doctorName: 'Dr. Ananya Sharma'
+                      patientName: 'Iqyan Ali'
+                      paymentStatus: 'COMPLETED'
+                meta:
+                  pagination:
+                    page: 1
+                    limit: 10
+                    totalItems: 12
+                    totalPages: 2
+                    hasNextPage: true
+                    hasPreviousPage: false
+
+  /consultations/{id}:
+    get:
+      tags: [Consultations]
+      summary: Get consultation details by ID
+      description: Retrieves full consultation details including doctor and patient summary, prescription existence, and payment status. Enforces strict object-level authorization (only assigned patient, assigned doctor, or admin can access).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Consultation details with executive summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsultationDetailResponse'
+        '403':
+          description: Forbidden - Not an assigned participant or admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '404':
+          description: Consultation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /consultations/{id}/status:
+    patch:
+      tags: [Consultations]
+      summary: Update consultation lifecycle status
+      description: Advances consultation status through its state machine (SCHEDULED -> IN_PROGRESS -> COMPLETED, or CANCELLED, NO_SHOW). Enforces transition rules (e.g. cancellation requires a cancellationReason and releases the booked slot).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [IN_PROGRESS, COMPLETED, CANCELLED, NO_SHOW]
+                cancellationReason:
+                  type: string
+                  description: Mandatory when transitioning to CANCELLED
+                notes:
+                  type: string
+      responses:
+        '200':
+          description: Status updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+        '403':
+          description: Unauthorized to perform this status transition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '409':
+          description: Invalid state transition (e.g. attempting to cancel COMPLETED consultation)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /consultations/{id}/video/join:
+    post:
+      tags: [Video Consultations]
+      summary: Join or initialize secure telemedicine video room
+      description: Restricts access to assigned patient, assigned doctor, and admin within the scheduled grace window (15 minutes before to 60 minutes after appointment). Returns signed JWT video access token and room URL.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Video session credentials and signed room token issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoJoinResponse'
+        '403':
+          description: Forbidden - Not assigned to this consultation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '409':
+          description: Conflict - Outside scheduled session window or consultation cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /consultations/{id}/video/leave:
+    post:
+      tags: [Video Consultations]
+      summary: Disconnect participant from active video room
+      description: Records user departure timestamp in audit log while leaving room open for remaining participants.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Successfully disconnected from video session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+
+  /consultations/{id}/video/end:
+    post:
+      tags: [Video Consultations]
+      summary: Conclude and terminate video consultation room (Doctor/Admin only)
+      description: Permanently terminates the active video session, calculates total session duration in seconds, logs duration audit event, and locks the room from further joins. Restricted to the assigned Doctor or Admin.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  example: 'Consultation concluded by doctor'
+      responses:
+        '200':
+          description: Video room terminated and duration recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+        '403':
+          description: Forbidden - Patients cannot terminate the room
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /consultations/{id}/video:
+    get:
+      tags: [Video Consultations]
+      summary: Retrieve video session status and metadata
+      description: Returns session lifecycle status (WAITING, ACTIVE, COMPLETED), start/end timestamps, and recorded call duration in seconds.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Video session details retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  statusCode:
+                    type: integer
+                    example: 200
+                  data:
+                    $ref: '#/components/schemas/VideoSession'
+        '403':
+          description: Forbidden - Not an authorized participant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '404':
+          description: Video session not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /consultations/{id}/messages:
+    post:
+      tags: [Clinical Messaging]
+      summary: Send secure clinical message in consultation
+      description: Participant-restricted in-consultation chat messaging. Updates unread counter and logs PHI-compliant audit event. Cannot post messages to CANCELLED consultations.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+      responses:
+        '201':
+          description: Message delivered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '403':
+          description: Forbidden - Not an authorized participant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '409':
+          description: Conflict - Consultation cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+    get:
+      tags: [Clinical Messaging]
+      summary: Retrieve paginated consultation messages
+      description: Retrieves message history in chronological or reverse-chronological order and automatically marks unread counterparty messages as read.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 30
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: asc
+      responses:
+        '200':
+          description: Paginated message history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageListResponse'
+
+  /consultations/{id}/attachments:
+    post:
+      tags: [Clinical Messaging]
+      summary: Upload secure clinical attachment
+      description: Uploads encrypted clinical documents or lab reports. Inspects file buffer magic bytes to guarantee authenticity (PDF, JPEG, PNG, WebP) and prevents spoofed extensions. Stores files securely on private server-side storage.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadAttachmentRequest'
+      responses:
+        '201':
+          description: Attachment uploaded and secured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentUploadResponse'
+        '422':
+          description: Invalid file type or magic byte mismatch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+
+    get:
+      tags: [Clinical Messaging]
+      summary: List all clinical attachments for consultation
+      description: Returns metadata (fileName, mimeType, fileSizeBytes, uploadedAt) for all clinical attachments uploaded to the consultation.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: List of attachment metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentListResponse'
+
+  /consultations/{id}/attachments/{attachmentId}:
+    get:
+      tags: [Clinical Messaging]
+      summary: Securely download clinical attachment file stream
+      description: Streams attachment content with appropriate Content-Type and Content-Disposition headers. Enforces strict participant access control.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: attachmentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Binary file stream
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '403':
+          description: Forbidden - Not an authorized participant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '404':
+          description: Attachment file not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /prescriptions:
+    post:
+      tags: [Prescriptions]
+      summary: Issue digital Ayurvedic prescription (Doctor only)
+      description: Creates an authentic prescription containing diagnosis, Ayurvedic medicines (name, dosage, frequency, duration, instructions), and future validity date. Prescriptions cannot be issued for NO_SHOW or uncommenced SCHEDULED consultations.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePrescriptionRequest'
+            example:
+              consultationId: '33333333-3333-3333-3333-333333333333'
+              diagnosis: 'Vata-Pitta Imbalance, Chronic Digestive Weakness'
+              medicines:
+                - name: 'Triphala Churna'
+                  dosage: '5g'
+                  frequency: 'Twice daily with warm water'
+                  duration: '14 days'
+                  instructions: 'Take after meals'
+                - name: 'Ashwagandha Capsule'
+                  dosage: '500mg'
+                  frequency: 'Once daily at bedtime'
+                  duration: '30 days'
+                  instructions: 'Take with warm milk'
+              validUntil: '2026-11-25T00:00:00.000Z'
+      responses:
+        '201':
+          description: Prescription issued successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrescriptionResponse'
+        '403':
+          description: Forbidden - Requires DOCTOR role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '409':
+          description: Consultation status is invalid for prescribing (e.g. NO_SHOW or uncommenced)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /prescriptions/consultation/{consultationId}:
+    get:
+      tags: [Prescriptions]
+      summary: Retrieve prescription for consultation
+      description: Returns the prescription record associated with the specified consultation UUID. Restricted to the patient, doctor, and administrator.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: consultationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Prescription details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrescriptionResponse'
+        '404':
+          description: Prescription not found for this consultation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /prescriptions/{id}:
+    get:
+      tags: [Prescriptions]
+      summary: Retrieve prescription by prescription ID
+      description: Fetches complete prescription information including practitioner name, clinical diagnosis, and prescribed medicine schedules.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Prescription details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrescriptionResponse'
+        '403':
+          description: Forbidden - Not authorized to view this prescription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '404':
+          description: Prescription not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /prescriptions/{id}/pdf:
+    get:
+      tags: [Prescriptions]
+      summary: Download clinical prescription as an authentic PDF document
+      description: Dynamically renders an official branded clinical PDF document containing clinical diagnosis, medicine regimens, doctor signature verification, and clinic credentials. Streams application/pdf with Content-Disposition attachment header.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Streamed official PDF prescription document
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '404':
+          description: Prescription not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /payments/initiate:
+    post:
+      tags: [Payments]
+      summary: Initiate consultation payment
+      description: Creates a payment intent for a scheduled consultation. Calculates practitioner fee, sets state to PENDING, and returns payment gateway order reference. Restricted to PATIENT role.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [consultationId]
+              properties:
+                consultationId:
+                  type: string
+                  format: uuid
+                paymentMethod:
+                  type: string
+                  enum: [UPI, NET_BANKING, CARD, WALLET]
+                  default: 'UPI'
+      responses:
+        '201':
+          description: Payment initiated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentInitiateResponse'
+        '404':
+          description: Consultation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /payments/webhook:
+    post:
+      tags: [Payments]
+      summary: Handle external payment gateway callback webhooks
+      description: Authenticates incoming payment gateway callbacks using HMAC-SHA256 signature verification over raw request body bytes via X-Webhook-Signature header. Updates consultation and payment status idempotently.
+      parameters:
+        - name: X-Webhook-Signature
+          in: header
+          required: true
+          description: HMAC-SHA256 signature calculated with PAYMENT_WEBHOOK_SECRET
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event, consultationId, transactionRef, amount, status]
+              properties:
+                event:
+                  type: string
+                  enum: [payment.captured, payment.failed, payment.refunded]
+                consultationId:
+                  type: string
+                  format: uuid
+                transactionRef:
+                  type: string
+                  example: 'pay_tx_12345678'
+                amount:
+                  type: number
+                  example: 750
+                status:
+                  type: string
+                  enum: [COMPLETED, FAILED, REFUNDED]
+      responses:
+        '200':
+          description: Webhook verified and processed idempotently
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+        '401':
+          description: Missing or invalid cryptographic webhook signature
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '409':
+          description: Unreconciled transaction amount or invalid state machine mutation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /payments/{consultationId}:
+    get:
+      tags: [Payments]
+      summary: Get payment status for consultation
+      description: Retrieves transaction status, amount, currency, and gateway reference for a given consultation.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: consultationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Payment status details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentStatusResponse'
+        '404':
+          description: Payment record not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /payments/{consultationId}/refund:
+    post:
+      tags: [Payments]
+      summary: Execute automated refund for completed consultation (Admin only)
+      description: Reimburses a completed payment, marks the payment as REFUNDED, transitions the uncommenced consultation to CANCELLED, and releases the booked slot. Restricted to ADMIN role.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: consultationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 500
+                  example: 'Patient requested cancellation prior to session start'
+      responses:
+        '200':
+          description: Payment refunded successfully and slot released
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+        '403':
+          description: Forbidden - ADMIN role required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '409':
+          description: Payment is not COMPLETED or consultation is already completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /payments/reconciliation:
+    get:
+      tags: [Payments, Admin]
+      summary: Payment financial reconciliation and transaction auditing (Admin only)
+      description: Generates executive settlement aggregates (gross revenue, refunds, net revenue) and lists filtered transaction history. Restricted to ADMIN role.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: startDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: endDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, COMPLETED, FAILED, REFUNDED]
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Financial reconciliation aggregates and transaction records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentReconciliationResponse'
+        '403':
+          description: Forbidden - ADMIN role required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /notifications:
+    get:
+      tags: [Notifications]
+      summary: Retrieve paginated notifications for authenticated user
+      description: Returns alerts, appointment reminders, and clinical notifications for the authenticated user, supporting filtering by unreadOnly.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: unreadOnly
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Paginated notifications list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationListResponse'
+
+  /notifications/{id}/read:
+    patch:
+      tags: [Notifications]
+      summary: Mark specific notification as read
+      description: Marks an individual notification owned by the authenticated user as read, setting readAt timestamp.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Notification marked as read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+        '403':
+          description: Forbidden - Notification belongs to another user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '404':
+          description: Notification not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /notifications/mark-all-read:
+    patch:
+      tags: [Notifications]
+      summary: Mark all notifications as read
+      description: Marks all unread notifications for the authenticated user as read in a single batch operation.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: All user notifications marked as read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+
+  /notifications/dispatch-reminders:
+    post:
+      tags: [Notifications, Admin]
+      summary: Trigger appointment reminder dispatching (Admin only)
+      description: Scans upcoming scheduled consultations within the configured time window (e.g. 60 minutes) and queues automated notifications and SMS/email alerts. Restricted to ADMIN role.
+      security:
+        - BearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                windowMinutes:
+                  type: integer
+                  minimum: 5
+                  maximum: 1440
+                  default: 60
+                  example: 60
+      responses:
+        '200':
+          description: Upcoming reminders processed and dispatched
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponseBase'
+        '403':
+          description: Forbidden - Requires ADMIN role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /admin/analytics:
+    get:
+      tags: [Admin]
+      summary: Platform-wide operational analytics overview (Admin only)
+      description: Returns aggregated metrics across the entire platform including total users (patients, doctors, admins), active consultations by status, total consultations, and total revenue. Restricted to ADMIN role.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Aggregated system statistics overview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminAnalyticsResponse'
+              example:
+                success: true
+                statusCode: 200
+                message: 'Admin analytics overview retrieved successfully'
+                data:
+                  users:
+                    total: 50
+                    patients: 40
+                    doctors: 8
+                    admins: 2
+                  consultations:
+                    total: 120
+                    scheduled: 15
+                    inProgress: 2
+                    completed: 95
+                    cancelled: 8
+                  revenue:
+                    totalInr: 71250
+        '403':
+          description: Forbidden - Requires ADMIN role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /admin/audit-logs:
+    get:
+      tags: [Admin]
+      summary: Retrieve system compliance audit trails (Admin only)
+      description: Queries immutable system audit logs for clinical security and regulatory compliance. Logs record actor userId, role, action, entityType, entityId, IP address, user agent, and metadata. Restricted to ADMIN role.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: action
+          in: query
+          description: Filter logs by action name (e.g. USER_LOGIN, CONSULTATION_BOOKED, PAYMENT_CAPTURED)
+          schema:
+            type: string
+        - name: entityType
+          in: query
+          description: Filter logs by entity model (e.g. User, Consultation, Payment)
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: System audit trail records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogListResponse'
+        '403':
+          description: Forbidden - Requires ADMIN role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'Enter your valid JWT access token in the format: Bearer <token>'
+
+  schemas:
+    ApiResponseBase:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: 'Operation completed successfully'
+
+    ApiErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        statusCode:
+          type: integer
+          example: 400
+        message:
+          type: string
+          example: 'An error occurred during request processing'
+
+    ValidationErrorItem:
+      type: object
+      properties:
+        path:
+          type: string
+          example: 'firstName'
+        message:
+          type: string
+          example: 'First name must contain only letters and cannot contain numbers'
+        code:
+          type: string
+          example: 'custom'
+
+    ValidationErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        statusCode:
+          type: integer
+          example: 422
+        message:
+          type: string
+          example: 'Request validation failed'
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationErrorItem'
+
+    PaginationMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+          example: 1
+        limit:
+          type: integer
+          example: 10
+        totalItems:
+          type: integer
+          example: 25
+        totalPages:
+          type: integer
+          example: 3
+        hasNextPage:
+          type: boolean
+          example: true
+        hasPreviousPage:
+          type: boolean
+          example: false
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: 'ok'
+        service:
+          type: string
+          example: 'amrutam-telemedicine-backend'
+        timestamp:
+          type: string
+          format: date-time
+        uptimeSeconds:
+          type: integer
+          example: 3600
+
+    ReadyResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: 'ready'
+        service:
+          type: string
+          example: 'amrutam-telemedicine-backend'
+        timestamp:
+          type: string
+          format: date-time
+        dependencies:
+          type: object
+          properties:
+            database:
+              type: object
+              properties:
+                status:
+                  type: string
+                  example: 'connected'
+                latencyMs:
+                  type: number
+                  example: 4
+
+    RegisterRequest:
+      type: object
+      required: [email, password, firstName, lastName]
+      properties:
+        email:
+          type: string
+          format: email
+          description: Valid email containing '@'
+          example: 'patient@example.com'
+        password:
+          type: string
+          format: password
+          minLength: 8
+          description: Must contain at least one uppercase, lowercase, number, and special symbol
+          example: 'SecurePassword123!'
+        role:
+          type: string
+          enum: [PATIENT]
+          default: PATIENT
+          description: Public self-registration is strictly restricted to PATIENT
+        firstName:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: Letters only, numbers are strictly prohibited
+          example: 'Ananya'
+        lastName:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: Letters only, numbers are strictly prohibited
+          example: 'Sharma'
+        phone:
+          type: string
+          description: Valid 10-digit mobile number
+          example: '9899312345'
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: 'patient@example.com'
+        password:
+          type: string
+          format: password
+          example: 'SecurePassword123!'
+
+    ProfileUpdateRequest:
+      type: object
+      properties:
+        firstName:
+          type: string
+          description: Letters only, numbers prohibited
+          example: 'Ananya'
+        lastName:
+          type: string
+          description: Letters only, numbers prohibited
+          example: 'Sharma'
+        phone:
+          type: string
+          description: 10-digit mobile number format
+          example: '9899312345'
+        gender:
+          type: string
+          enum: [MALE, FEMALE, OTHER, PREFER_NOT_TO_SAY]
+          example: 'FEMALE'
+        bloodGroup:
+          type: string
+          enum: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']
+          example: 'B+'
+        address:
+          type: string
+          maxLength: 255
+          example: 'Civil Lines, Delhi'
+        emergencyContact:
+          type: string
+          description: 10-digit mobile number format
+          example: '9899300000'
+        dateOfBirth:
+          type: string
+          format: date-time
+          example: '1995-04-12T00:00:00.000Z'
+
+    CreateSlotsRequest:
+      type: object
+      required: [slots]
+      properties:
+        slots:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            required: [startTime, endTime]
+            properties:
+              startTime:
+                type: string
+                format: date-time
+                example: '2026-10-25T10:00:00.000Z'
+              endTime:
+                type: string
+                format: date-time
+                example: '2026-10-25T10:30:00.000Z'
+
+    BookConsultationRequest:
+      type: object
+      required: [slotId]
+      properties:
+        slotId:
+          type: string
+          format: uuid
+          example: '22222222-2222-2222-2222-222222222222'
+        notes:
+          type: string
+          maxLength: 1000
+          example: 'Chronic migraine headaches and digestive acidity'
+        idempotencyKey:
+          type: string
+          minLength: 8
+          maxLength: 128
+          example: 'idemp-key-77889900'
+
+    CreatePrescriptionRequest:
+      type: object
+      required: [consultationId, diagnosis, medicines]
+      properties:
+        consultationId:
+          type: string
+          format: uuid
+        diagnosis:
+          type: string
+          minLength: 3
+          maxLength: 1000
+          example: 'Vata-Pitta Imbalance, Chronic Migraine'
+        medicines:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [name, dosage, frequency, duration]
+            properties:
+              name:
+                type: string
+                example: 'Triphala Churna'
+              dosage:
+                type: string
+                example: '5g'
+              frequency:
+                type: string
+                example: 'Twice daily with warm water'
+              duration:
+                type: string
+                example: '14 days'
+              instructions:
+                type: string
+                example: 'Take after meals'
+        instructions:
+          type: string
+          maxLength: 2000
+          example: 'Avoid spicy foods and ensure adequate hydration.'
+        validUntil:
+          type: string
+          format: date-time
+          example: '2026-11-25T00:00:00.000Z'
+
+    SendMessageRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          example: 'Hello doctor, I have uploaded my latest blood test reports.'
+        attachmentId:
+          type: string
+          format: uuid
+
+    UploadAttachmentRequest:
+      type: object
+      required: [fileName, mimeType, fileData]
+      properties:
+        fileName:
+          type: string
+          example: 'blood_test_report.pdf'
+        mimeType:
+          type: string
+          enum: [application/pdf, image/jpeg, image/png, image/webp]
+          example: 'application/pdf'
+        fileData:
+          type: string
+          description: 'Base64 encoded file contents matching declared mimeType'
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        role:
+          type: string
+          enum: [PATIENT, DOCTOR, ADMIN]
+        isMfaActive:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+
+    DoctorItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: 'Dr. Ananya Sharma'
+        email:
+          type: string
+          example: 'doctor@example.com'
+        specialization:
+          type: string
+          example: 'Ayurveda'
+        experienceYears:
+          type: integer
+          example: 8
+        consultationFee:
+          type: number
+          example: 750
+        isVerified:
+          type: boolean
+          example: true
+
+    DoctorListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: 'Doctors retrieved successfully'
+        data:
+          type: object
+          properties:
+            summary:
+              type: object
+              properties:
+                total:
+                  type: integer
+                  example: 20
+                verified:
+                  type: integer
+                  example: 15
+                unverified:
+                  type: integer
+                  example: 5
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/DoctorItem'
+        meta:
+          type: object
+          properties:
+            pagination:
+              $ref: '#/components/schemas/PaginationMeta'
+
+    DoctorDetailResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: 'Doctor profile retrieved successfully'
+        data:
+          type: object
+          properties:
+            summary:
+              type: object
+              properties:
+                name:
+                  type: string
+                specialization:
+                  type: string
+                experienceYears:
+                  type: integer
+                consultationFee:
+                  type: number
+                isVerified:
+                  type: boolean
+                availableSlotsCount:
+                  type: integer
+            profile:
+              type: object
+              properties:
+                id:
+                  type: string
+                name:
+                  type: string
+                specialization:
+                  type: string
+                qualification:
+                  type: string
+                experienceYears:
+                  type: integer
+                consultationFee:
+                  type: number
+                bio:
+                  type: string
+                isVerified:
+                  type: boolean
+
+    UserProfileResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: 'User profile retrieved successfully'
+        data:
+          type: object
+          properties:
+            summary:
+              type: object
+              properties:
+                name:
+                  type: string
+                role:
+                  type: string
+                email:
+                  type: string
+                isMfaActive:
+                  type: boolean
+                hasCompletedProfile:
+                  type: boolean
+            profile:
+              type: object
+
+    ConsultationListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: 'Consultations retrieved successfully'
+        data:
+          type: object
+          properties:
+            summary:
+              type: object
+              properties:
+                total:
+                  type: integer
+                scheduled:
+                  type: integer
+                inProgress:
+                  type: integer
+                completed:
+                  type: integer
+                cancelled:
+                  type: integer
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  consultationNumber:
+                    type: string
+                  status:
+                    type: string
+                  scheduledAt:
+                    type: string
+                  doctorName:
+                    type: string
+                  patientName:
+                    type: string
+                  paymentStatus:
+                    type: string
+        meta:
+          type: object
+          properties:
+            pagination:
+              $ref: '#/components/schemas/PaginationMeta'
+
+    ConsultationDetailResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: 'Consultation retrieved successfully'
+        data:
+          type: object
+          properties:
+            summary:
+              type: object
+              properties:
+                consultationNumber:
+                  type: string
+                status:
+                  type: string
+                scheduledAt:
+                  type: string
+                doctorName:
+                  type: string
+                patientName:
+                  type: string
+                paymentStatus:
+                  type: string
+                hasPrescription:
+                  type: boolean
+
+    ConsultationBookingResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 201
+        message:
+          type: string
+          example: 'Consultation booked successfully'
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+            consultationNumber:
+              type: string
+            status:
+              type: string
+              example: 'SCHEDULED'
+
+    AvailabilitySlotsResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: 'Availability slots retrieved successfully'
+        data:
+          type: object
+          properties:
+            summary:
+              type: object
+              properties:
+                total:
+                  type: integer
+                available:
+                  type: integer
+                booked:
+                  type: integer
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  startTime:
+                    type: string
+                  endTime:
+                    type: string
+                  status:
+                    type: string
+
+    AuthSuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: 'Authentication successful'
+        data:
+          type: object
+          properties:
+            user:
+              $ref: '#/components/schemas/User'
+            tokens:
+              type: object
+              properties:
+                accessToken:
+                  type: string
+                refreshToken:
+                  type: string
+
+    VideoSession:
+      type: object
+      properties:
+        id:
+          type: string
+        consultationId:
+          type: string
+        roomId:
+          type: string
+        status:
+          type: string
+          enum: [WAITING, ACTIVE, COMPLETED]
+        startedAt:
+          type: string
+        endedAt:
+          type: string
+        durationSeconds:
+          type: integer
+
+    VideoJoinResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: 'Video consultation room session joined successfully'
+        data:
+          type: object
+          properties:
+            session:
+              $ref: '#/components/schemas/VideoSession'
+            accessToken:
+              type: string
+            roomUrl:
+              type: string
+            permissions:
+              type: object
+              properties:
+                isModerator:
+                  type: boolean
+                canScreenShare:
+                  type: boolean
+
+    MessageResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 201
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+            content:
+              type: string
+            senderRole:
+              type: string
+            createdAt:
+              type: string
+
+    MessageListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        data:
+          type: object
+          properties:
+            messages:
+              type: array
+              items:
+                type: object
+            pagination:
+              $ref: '#/components/schemas/PaginationMeta'
+
+    AttachmentUploadResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 201
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+            fileName:
+              type: string
+            mimeType:
+              type: string
+
+    AttachmentListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        data:
+          type: object
+          properties:
+            attachments:
+              type: array
+              items:
+                type: object
+
+    PrescriptionResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+            consultationId:
+              type: string
+            diagnosis:
+              type: string
+            medicines:
+              type: array
+              items:
+                type: object
+
+    PaymentInitiateResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 201
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+            amount:
+              type: number
+            status:
+              type: string
+              example: 'PENDING'
+            gatewayReference:
+              type: string
+
+    PaymentStatusResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+            amount:
+              type: number
+            status:
+              type: string
+              example: 'COMPLETED'
+
+    PaymentReconciliationResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        data:
+          type: object
+          properties:
+            summary:
+              type: object
+              properties:
+                grossRevenueInr:
+                  type: number
+                refundedInr:
+                  type: number
+                netRevenueInr:
+                  type: number
+                totalTransactions:
+                  type: integer
+            transactions:
+              type: array
+              items:
+                type: object
+
+    NotificationListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              title:
+                type: string
+              content:
+                type: string
+              isRead:
+                type: boolean
+
+    AdminAnalyticsResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        data:
+          type: object
+          properties:
+            users:
+              type: object
+            consultations:
+              type: object
+            revenue:
+              type: object
+
+    AuditLogListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        data:
+          type: object
+          properties:
+            logs:
+              type: array
+              items:
+                type: object
+            pagination:
+              $ref: '#/components/schemas/PaginationMeta'
