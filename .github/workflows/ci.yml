@@ -62,6 +62,7 @@ jobs:
           JWT_ACCESS_SECRET: ci-test-jwt-access-secret-minimum-32-chars-long!
           JWT_REFRESH_SECRET: ci-test-jwt-refresh-secret-minimum-32-chars-long!
           PAYMENT_WEBHOOK_SECRET: ci-test-payment-webhook-secret-32-chars!
+          VIDEO_JWT_SECRET: ci-test-video-jwt-secret-minimum-32-chars!
           MFA_ENCRYPTION_KEY: ci-test-mfa-encryption-key-32-chars!
           PORT: 5001
           LOG_LEVEL: silent
