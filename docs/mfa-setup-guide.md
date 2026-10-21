@@ -41,8 +41,8 @@ MFA configuration requires an authenticated session.
 **Body:**
 ```json
 {
-  "email": "dr.ayur@amrutam.local",
-  "password": "DemoPassword123!"
+  "email": "<YOUR_EMAIL>",
+  "password": "<YOUR_PASSWORD>"
 }
 ```
 
@@ -165,8 +165,8 @@ Once MFA is enabled, login becomes a two-step challenge:
 `POST /api/v1/auth/login` with your email and password:
 ```json
 {
-  "email": "dr.ayur@amrutam.local",
-  "password": "DemoPassword123!"
+  "email": "<YOUR_EMAIL>",
+  "password": "<YOUR_PASSWORD>"
 }
 ```
 
@@ -230,7 +230,7 @@ To disable Two-Factor Authentication, the user must provide both their password 
 **Request Body:**
 ```json
 {
-  "password": "DemoPassword123!",
+  "password": "<YOUR_CURRENT_PASSWORD>",
   "code": "819402"
 }
 ```

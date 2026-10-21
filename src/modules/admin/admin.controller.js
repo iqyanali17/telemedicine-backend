@@ -12,4 +12,22 @@ export class AdminController {
     const result = await AdminService.getAuditLogs(req.query);
     return ApiResponse.ok(res, 'Audit logs retrieved successfully', result.logs, result.pagination);
   });
+
+  static listDoctors = asyncHandler(async (req, res) => {
+    const result = await AdminService.listDoctors(req.query);
+    return ApiResponse.paginated(
+      res,
+      'Doctor verifications retrieved successfully',
+      { summary: result.summary, items: result.items },
+      result.pagination
+    );
+  });
+
+  static verifyDoctor = asyncHandler(async (req, res) => {
+    const result = await AdminService.verifyDoctor(req.params.id, req.body, req.user.id);
+    const message = result.isVerified
+      ? 'Doctor medical license verified successfully. Profile is now active in patient directory.'
+      : 'Doctor verification revoked successfully';
+    return ApiResponse.ok(res, message, result);
+  });
 }

@@ -14,8 +14,10 @@ This checklist tracks security controls implemented in the backend foundation al
 - [x] **Payload Size Limits**: Incoming JSON bodies restricted to 1MB to prevent memory exhaustion attacks.
 - [x] **CORS Origin Whitelisting**: Restricted to explicit domains configured via `CORS_ORIGIN` environment variable.
 - [x] **Safe Error Serialization**: Sensitive server details, file system paths, and stack traces are suppressed in production mode.
-- [x] **PII & Medical Redaction**: Structured logger (`pino`) automatically redacts passwords, tokens, medicines, and diagnostic strings.
 - [x] **Multi-Factor Authentication (TOTP RFC 6238)**: Implemented native RFC 6238 TOTP with AES-256-GCM authenticated secret encryption and atomic replay prevention. See [MFA Setup Guide](mfa-setup-guide.md).
+- [x] **Doctor Credential & Medical License Verification**: Practitioners registering via `POST /api/v1/auth/doctor/register` default to `isVerified: false`. Unverified profiles are quarantined from public directory discovery and appointment booking until an authorized administrator verifies medical credentials via `PATCH /api/v1/admin/doctors/:id/verify`.
+- [x] **Strict Clinical Field Validation**: Names strictly enforced to alphabetic characters (`^[a-zA-Z\s'-]+$`), phones to 10 numeric digits, passwords to high-entropy complexity (upper/lower/digit/special), and license numbers to unique medical registry keys.
+- [x] **Administrative Audit Trails**: All doctor verification approvals and status revocations are immutably committed to `AuditLog` recording the admin actor ID, target doctor email, license number, timestamp, and optional reason notes.
 
 ---
 

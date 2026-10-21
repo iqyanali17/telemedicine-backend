@@ -116,6 +116,116 @@ export class AuthService {
   }
 
   /**
+   * Registers a doctor application with doctorProfile initialized as unverified (isVerified: false)
+   */
+  static async registerDoctor({
+    email,
+    password,
+    firstName,
+    lastName,
+    phone,
+    licenseNumber,
+    specialization,
+    experienceYears,
+    consultationFee,
+    qualification,
+    bio,
+  }) {
+    const cleanEmail = email.toLowerCase().trim();
+    const cleanPhone = phone && phone.trim() ? phone.trim() : null;
+    const cleanLicense = licenseNumber.trim();
+
+    // Check email uniqueness
+    const existingUser = await prisma.user.findUnique({
+      where: { email: cleanEmail },
+    });
+    if (existingUser) {
+      throw ApiError.conflict('An account with this email already exists');
+    }
+
+    // Check phone uniqueness
+    if (cleanPhone) {
+      const existingPhone = await prisma.profile.findFirst({
+        where: { phone: cleanPhone },
+      });
+      if (existingPhone) {
+        throw ApiError.conflict('An account with this phone number already exists');
+      }
+    }
+
+    // Check medical license number uniqueness
+    const existingLicense = await prisma.doctorProfile.findUnique({
+      where: { licenseNumber: cleanLicense },
+    });
+    if (existingLicense) {
+      throw ApiError.conflict('A doctor with this medical license number already exists');
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    const user = await prisma.user.create({
+      data: {
+        email: cleanEmail,
+        passwordHash,
+        role: 'DOCTOR',
+        profile: {
+          create: {
+            firstName: firstName.trim(),
+            lastName: lastName.trim(),
+            phone: cleanPhone,
+          },
+        },
+        doctorProfile: {
+          create: {
+            licenseNumber: cleanLicense,
+            specialization: specialization.trim(),
+            experienceYears: Number(experienceYears),
+            consultationFee: Number(consultationFee),
+            qualification: qualification.trim(),
+            bio: bio ? bio.trim() : null,
+            isVerified: false, // 🛡️ Unverified by default pending admin license audit
+          },
+        },
+      },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        createdAt: true,
+        profile: {
+          select: {
+            firstName: true,
+            lastName: true,
+            phone: true,
+          },
+        },
+        doctorProfile: {
+          select: {
+            id: true,
+            licenseNumber: true,
+            specialization: true,
+            experienceYears: true,
+            consultationFee: true,
+            qualification: true,
+            bio: true,
+            isVerified: true,
+          },
+        },
+      },
+    });
+
+    const tokens = this.generateTokens(user);
+    await this.persistRefreshToken(user.id, tokens.refreshToken);
+
+    return {
+      user,
+      tokens,
+      verificationStatus: 'PENDING_APPROVAL',
+      message: 'Doctor application submitted successfully. Your profile is pending administrative license verification.',
+    };
+  }
+
+  /**
    * Authenticates user credentials
    */
   static async authenticateUser({ email, password }) {

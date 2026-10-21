@@ -53,6 +53,18 @@ export class AuthController {
     return ApiResponse.created(res, 'User registered successfully', result);
   });
 
+  static registerDoctor = asyncHandler(async (req, res) => {
+    const result = await AuthService.registerDoctor(req.body);
+    if (result.tokens?.refreshToken) {
+      setRefreshTokenCookie(res, result.tokens.refreshToken);
+    }
+    return ApiResponse.created(
+      res,
+      'Doctor application submitted successfully. Your profile is pending administrative license verification.',
+      result
+    );
+  });
+
   static login = asyncHandler(async (req, res) => {
     const result = await AuthService.authenticateUser(req.body);
     if (result.tokens?.refreshToken) {
