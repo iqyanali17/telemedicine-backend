@@ -15,7 +15,7 @@ async function main() {
   for (const statement of statements) {
     await prisma.$executeRawUnsafe(statement);
   }
-  console.log('GIN trigram indexes successfully restored in PostgreSQL.');
+  console.info('GIN trigram indexes successfully restored in PostgreSQL.');
   process.exit(0);
 }
 

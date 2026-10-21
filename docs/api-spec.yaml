@@ -183,6 +183,92 @@ paths:
               schema:
                 $ref: '#/components/schemas/ValidationErrorResponse'
 
+  /auth/doctor/register:
+    post:
+      tags: [Authentication, Doctors]
+      summary: Submit doctor onboarding application
+      description: Allows a prospective doctor to submit their professional and medical credentials for administrative license verification. Automatically initializes the doctor profile in unverified status (`isVerified: false`). The doctor will NOT appear in public patient search results until verified by an Administrator.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, firstName, lastName, phone, licenseNumber, specialization, experienceYears, consultationFee, qualification]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: 'dr.ananya@amrutam.co.in'
+                password:
+                  type: string
+                  format: password
+                  example: 'DoctorSecure123!'
+                firstName:
+                  type: string
+                  example: 'Ananya'
+                lastName:
+                  type: string
+                  example: 'Sharma'
+                phone:
+                  type: string
+                  example: '9876543210'
+                licenseNumber:
+                  type: string
+                  example: 'AYUR-MED-2024-888'
+                specialization:
+                  type: string
+                  example: 'Ayurvedic Medicine & Panchakarma'
+                experienceYears:
+                  type: integer
+                  example: 8
+                consultationFee:
+                  type: number
+                  example: 750
+                qualification:
+                  type: string
+                  example: 'BAMS, MD (Ayurveda)'
+                bio:
+                  type: string
+                  example: 'Specialist in holistic lifestyle disorders and traditional panchakarma therapies.'
+      responses:
+        '201':
+          description: Doctor application submitted successfully in pending status
+          content:
+            application/json:
+              example:
+                success: true
+                statusCode: 201
+                message: 'Doctor application submitted successfully. Your profile is pending administrative license verification.'
+                data:
+                  user:
+                    id: 'doc-uuid-1234'
+                    email: 'dr.ananya@amrutam.co.in'
+                    role: 'DOCTOR'
+                    profile:
+                      firstName: 'Ananya'
+                      lastName: 'Sharma'
+                      phone: '9876543210'
+                    doctorProfile:
+                      licenseNumber: 'AYUR-MED-2024-888'
+                      specialization: 'Ayurvedic Medicine & Panchakarma'
+                      experienceYears: 8
+                      consultationFee: 750
+                      isVerified: false
+                  verificationStatus: 'PENDING_APPROVAL'
+        '409':
+          description: Conflict - Email, phone, or license number already registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '422':
+          description: Validation failure (e.g. invalid license, weak password, negative fee)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+
   /auth/login:
     post:
       tags: [Authentication]
@@ -1953,6 +2039,107 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiErrorResponse'
 
+  /admin/doctors:
+    get:
+      tags: [Admin]
+      summary: List doctors for administrative review and credential verification (Admin only)
+      description: Returns doctor profiles with filtering options (verified, pending approval, or all), text search across name/email/license, and summary status counts. Restricted to ADMIN role.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: isVerified
+          in: query
+          description: Filter by verification status ('true', 'false', or 'all')
+          schema:
+            type: string
+            enum: ['true', 'false', 'all']
+            default: 'all'
+        - name: search
+          in: query
+          description: Search term matching doctor name, email, phone, specialization, or license number
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+      responses:
+        '200':
+          description: Paginated doctor profiles for verification review
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminDoctorListResponse'
+        '403':
+          description: Forbidden - Requires ADMIN role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /admin/doctors/{id}/verify:
+    patch:
+      tags: [Admin]
+      summary: Verify or reject doctor credentials and license (Admin only)
+      description: Approves or revokes a doctor's medical license credentials. Upon verification (isVerified=true), the doctor profile immediately becomes discoverable in public search and available for consultations. Immutable audit trail entry is logged. Restricted to ADMIN role.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: DoctorProfile UUID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [isVerified]
+              properties:
+                isVerified:
+                  type: boolean
+                  description: True to verify and activate practitioner; false to reject or suspend
+                  example: true
+                rejectionReason:
+                  type: string
+                  description: Optional explanatory note if rejecting or revoking credentials
+                  example: 'License documentation verified and authenticated with State Medical Council.'
+      responses:
+        '200':
+          description: Doctor verification status successfully updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminDoctorVerifyResponse'
+        '400':
+          description: Bad Request - Invalid parameters or request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '403':
+          description: Forbidden - Requires ADMIN role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '404':
+          description: Doctor profile not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
 components:
   securitySchemes:
     BearerAuth:
@@ -2889,3 +3076,121 @@ components:
                 type: object
             pagination:
               $ref: '#/components/schemas/PaginationMeta'
+
+    AdminDoctorListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: 'Doctor verifications retrieved successfully'
+        data:
+          type: object
+          properties:
+            summary:
+              type: object
+              properties:
+                total:
+                  type: integer
+                  example: 10
+                verified:
+                  type: integer
+                  example: 8
+                pending:
+                  type: integer
+                  example: 2
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  userId:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                    example: 'Dr. Ananya Sharma'
+                  email:
+                    type: string
+                    example: 'dr.ananya@amrutam.co.in'
+                  phone:
+                    type: string
+                    example: '9876543210'
+                  licenseNumber:
+                    type: string
+                    example: 'AYUR-MED-2024-888'
+                  specialization:
+                    type: string
+                    example: 'Ayurvedic Medicine & Panchakarma'
+                  experienceYears:
+                    type: integer
+                    example: 8
+                  consultationFee:
+                    type: number
+                    example: 750
+                  qualification:
+                    type: string
+                    example: 'BAMS, MD (Ayurveda)'
+                  bio:
+                    type: string
+                    example: 'Specialist in holistic treatments and chronic health conditions.'
+                  isVerified:
+                    type: boolean
+                    example: false
+                  createdAt:
+                    type: string
+                    format: date-time
+            pagination:
+              $ref: '#/components/schemas/PaginationMeta'
+
+    AdminDoctorVerifyResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        statusCode:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: 'Doctor verification status updated successfully'
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            userId:
+              type: string
+              format: uuid
+            name:
+              type: string
+              example: 'Dr. Ananya Sharma'
+            email:
+              type: string
+              example: 'dr.ananya@amrutam.co.in'
+            licenseNumber:
+              type: string
+              example: 'AYUR-MED-2024-888'
+            specialization:
+              type: string
+              example: 'Ayurvedic Medicine & Panchakarma'
+            isVerified:
+              type: boolean
+              example: true
+            rejectionReason:
+              type: string
+              nullable: true
+              example: null
+            updatedAt:
+              type: string
+              format: date-time

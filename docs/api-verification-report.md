@@ -107,6 +107,9 @@ Across all six implementation phases, the backend underwent comprehensive harden
 | 42 | `POST` | `/api/v1/notifications/dispatch-reminders` | Yes | `ADMIN` | None | Verified |
 | 43 | `GET` | `/api/v1/admin/analytics` | Yes | `ADMIN` | None | Verified |
 | 44 | `GET` | `/api/v1/admin/audit-logs` | Yes | `ADMIN` | `auditLogsQuerySchema` | Verified |
+| 45 | `POST` | `/api/v1/auth/doctor/register` | No | Public | `registerDoctorSchema` | Verified (Field Validation & Isolation) |
+| 46 | `GET` | `/api/v1/admin/doctors` | Yes | `ADMIN` | `listDoctorVerificationsQuerySchema` | Verified (Status Filtering & Search) |
+| 47 | `PATCH` | `/api/v1/admin/doctors/:id/verify` | Yes | `ADMIN` | `verifyDoctorParamSchema`, `verifyDoctorBodySchema` | Verified (Audit Trail & Discovery Activation) |
 
 ---
 
@@ -115,6 +118,7 @@ Across all six implementation phases, the backend underwent comprehensive harden
 ```
  RUN  v5.0.5 C:/telemedicine-backend
 
+ ✓ tests/integration/doctor-onboarding-and-verification.test.js (13 tests)
  ✓ tests/integration/clinical-messaging.test.js (17 tests)
  ✓ tests/integration/auth-flows.test.js (13 tests)
  ✓ tests/integration/payment-reliability.test.js (17 tests)
@@ -136,9 +140,9 @@ Across all six implementation phases, the backend underwent comprehensive harden
  ✓ src/modules/auth/auth.test.js (4 tests)
  ✓ tests/integration/health.test.js (5 tests)
 
- Test Files  20 passed (20)
-      Tests  182 passed (182)
-   Duration  7.72s
+ Test Files  21 passed (21)
+      Tests  207 passed (207)
+   Duration  8.55s
 ```
 
 ---

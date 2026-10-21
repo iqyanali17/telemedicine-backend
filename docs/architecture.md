@@ -144,6 +144,13 @@ To support 100,000 consultations per day:
 - **Two-Step Login**: Enforces second-factor TOTP verification during `/auth/login` when `isMfaEnabled` is active, with temporary 5-minute session challenges.
 - **Token Rotation & Replay Attack Defense**: Single-use refresh token rotation that instantly revokes all user sessions if a revoked refresh token is replayed.
 
+### 6.6 Doctor Registration, Credential Validation & Administrative Verification Workflow
+- **Public Doctor Application Submission**: Practitioners register via `POST /api/v1/auth/doctor/register` submitting personal, contact, and clinical credential information.
+- **Strict Clinical Validation Engine**: Zod schemas enforce alphabetic-only name constraints (`^[a-zA-Z\s'-]+$`), 10-digit Indian phone numbers (`^[0-9]{10}$`), high-entropy passwords (8+ chars with uppercase, lowercase, digit, and special symbol), and valid non-negative consultation fees.
+- **Two-Phase Isolation Security**: New doctor profiles default to `isVerified: false`. Unverified doctors are strictly quarantined and filtered out of public directory searches (`GET /api/v1/doctors`) and cannot receive appointment bookings.
+- **Administrative Inspection & Review**: Platform administrators query pending applications via `GET /api/v1/admin/doctors?isVerified=false` with search across names, emails, phones, and license numbers, with aggregated verification status metrics (`total`, `verified`, `pending`).
+- **Administrative Verification & Audit Logging**: Administrators approve or revoke practitioner status via `PATCH /api/v1/admin/doctors/:id/verify`. Setting `isVerified: true` publishes the doctor into the active search index. All verification state transitions record immutable `AuditLog` events (`DOCTOR_VERIFIED` or `DOCTOR_VERIFICATION_REVOKED`) tracking the admin ID, doctor email, license, and optional reason notes.
+
 ---
 
 ## 7. Cloud Deployment & Operational Readiness
